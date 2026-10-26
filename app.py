@@ -46,10 +46,10 @@ HTML_TEMPLATE = """
         {% if step == 'credentials' %}
             <form method="POST" action="/save-credentials">
                 <label>API ID:</label>
-                <input type="text" name="api_id" placeholder="1234567" required>
+                <input type="text" name="api_id" placeholder="30357864" required>
                 
                 <label>API Hash:</label>
-                <input type="text" name="api_hash" placeholder="your_api_hash_here" required>
+                <input type="text" name="api_hash" placeholder="8d8a1027816b1724b0b420480ea06a6f" required>
                 
                 <label>Phone Number:</label>
                 <input type="text" name="phone" placeholder="+919876543210" required>
@@ -88,11 +88,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
-
 @app.route("/")
 def index():
     if session.get("logged_in"):
@@ -107,7 +102,6 @@ def index():
 @app.route("/save-credentials", methods=["POST"])
 def save_credentials():
     try:
-        from pyrogram import Client
         api_id = int(request.form.get("api_id").strip())
         api_hash = request.form.get("api_hash").strip()
         phone = request.form.get("phone").strip()
@@ -116,13 +110,20 @@ def save_credentials():
         session["api_hash"] = api_hash
         session["phone"] = phone
 
-        async def _send():
+        def _run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            from pyrogram import Client
             client = Client(f"session_{phone.replace('+', '')}", api_id=api_id, api_hash=api_hash, in_memory=True)
-            await client.connect()
-            sent_code = await client.send_code(phone)
-            return client, sent_code
+            
+            async def _send():
+                await client.connect()
+                sent_code = await client.send_code(phone)
+                return client, sent_code
 
-        client, sent_code = run_async(_send())
+            return loop.run_until_complete(_send())
+
+        client, sent_code = _run()
         session["phone_code_hash"] = sent_code.phone_code_hash
         temp_storage["client"] = client
         session["waiting_for_otp"] = True
@@ -137,19 +138,25 @@ def verify_otp():
     phone_code_hash = session.get("phone_code_hash")
     client = temp_storage.get("client")
     
-    async def _verify():
-        from pyrogram.errors import SessionPasswordNeeded
-        try:
-            await client.sign_in(phone, phone_code_hash, otp)
-            session["logged_in"] = True
-            session.pop("waiting_for_otp", None)
-            await client.disconnect()
-        except SessionPasswordNeeded:
-            session.pop("waiting_for_otp", None)
-            session["waiting_for_password"] = True
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def _verify():
+            from pyrogram.errors import SessionPasswordNeeded
+            try:
+                await client.sign_in(phone, phone_code_hash, otp)
+                session["logged_in"] = True
+                session.pop("waiting_for_otp", None)
+                await client.disconnect()
+            except SessionPasswordNeeded:
+                session.pop("waiting_for_otp", None)
+                session["waiting_for_password"] = True
+
+        loop.run_until_complete(_verify())
 
     try:
-        run_async(_verify())
+        _run()
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="otp", error=str(e))
     return redirect(url_for("index"))
@@ -159,14 +166,20 @@ def verify_password():
     password = request.form.get("password")
     client = temp_storage.get("client")
     
-    async def _password():
-        await client.check_password(password)
-        session["logged_in"] = True
-        session.pop("waiting_for_password", None)
-        await client.disconnect()
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def _password():
+            await client.check_password(password)
+            session["logged_in"] = True
+            session.pop("waiting_for_password", None)
+            await client.disconnect()
+
+        loop.run_until_complete(_password())
 
     try:
-        run_async(_password())
+        _run()
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="password", error=str(e))
     return redirect(url_for("index"))
