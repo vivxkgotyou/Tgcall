@@ -1,4 +1,5 @@
 import os
+import asyncio
 from flask import Flask, render_template_string, request, redirect, url_for, session
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded
@@ -7,11 +8,7 @@ app = Flask(__name__)
 app.secret_key = "vivek_panel_secret_key"
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Agar uploads folder na ho toh bana le
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-API_ID = 30357864
-API_HASH = "8d8a1027816b1724b0b420480ea06a6f"
 
 temp_storage = {}
 
@@ -48,10 +45,17 @@ HTML_TEMPLATE = """
             <div class="success">{{ msg }}</div>
         {% endif %}
 
-        {% if step == 'phone' %}
-            <form method="POST" action="/send-code">
+        {% if step == 'credentials' %}
+            <form method="POST" action="/save-credentials">
+                <label>API ID:</label>
+                <input type="text" name="api_id" placeholder="1234567" required>
+                
+                <label>API Hash:</label>
+                <input type="text" name="api_hash" placeholder="your_api_hash_here" required>
+                
                 <label>Phone Number:</label>
                 <input type="text" name="phone" placeholder="+919876543210" required>
+                
                 <button type="submit" class="btn">Send OTP</button>
             </form>
         {% elif step == 'otp' %}
@@ -86,6 +90,11 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
 @app.route("/")
 def index():
     if session.get("logged_in"):
@@ -95,21 +104,31 @@ def index():
     elif session.get("waiting_for_otp"):
         return render_template_string(HTML_TEMPLATE, step="otp")
     else:
-        return render_template_string(HTML_TEMPLATE, step="phone")
+        return render_template_string(HTML_TEMPLATE, step="credentials")
 
-@app.route("/send-code", methods=["POST"])
-def send_code():
-    phone = request.form.get("phone").strip()
-    session["phone"] = phone
+@app.route("/save-credentials", methods=["POST"])
+def save_credentials():
     try:
-        client = Client(f"session_{phone.replace('+', '')}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        client.connect()
-        sent_code = client.send_code(phone)
+        api_id = int(request.form.get("api_id").strip())
+        api_hash = request.form.get("api_hash").strip()
+        phone = request.form.get("phone").strip()
+        
+        session["api_id"] = api_id
+        session["api_hash"] = api_hash
+        session["phone"] = phone
+
+        async def _send():
+            client = Client(f"session_{phone.replace('+', '')}", api_id=api_id, api_hash=api_hash, in_memory=True)
+            await client.connect()
+            sent_code = await client.send_code(phone)
+            return client, sent_code
+
+        client, sent_code = run_async(_send())
         session["phone_code_hash"] = sent_code.phone_code_hash
         temp_storage["client"] = client
         session["waiting_for_otp"] = True
     except Exception as e:
-        return render_template_string(HTML_TEMPLATE, step="phone", error=str(e))
+        return render_template_string(HTML_TEMPLATE, step="credentials", error=str(e))
     return redirect(url_for("index"))
 
 @app.route("/verify-otp", methods=["POST"])
@@ -118,11 +137,15 @@ def verify_otp():
     phone = session.get("phone")
     phone_code_hash = session.get("phone_code_hash")
     client = temp_storage.get("client")
+    
+    async def _verify():
+        await client.sign_in(phone, phone_code_hash, otp)
+        await client.disconnect()
+
     try:
-        client.sign_in(phone, phone_code_hash, otp)
+        run_async(_verify())
         session["logged_in"] = True
         session.pop("waiting_for_otp", None)
-        client.disconnect()
     except SessionPasswordNeeded:
         session.pop("waiting_for_otp", None)
         session["waiting_for_password"] = True
@@ -134,11 +157,15 @@ def verify_otp():
 def verify_password():
     password = request.form.get("password")
     client = temp_storage.get("client")
+    
+    async def _password():
+        await client.check_password(password)
+        await client.disconnect()
+
     try:
-        client.check_password(password)
+        run_async(_password())
         session["logged_in"] = True
         session.pop("waiting_for_password", None)
-        client.disconnect()
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="password", error=str(e))
     return redirect(url_for("index"))
