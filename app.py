@@ -10,6 +10,10 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 temp_storage = {}
 
+# Global event loop for background tasks
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -110,22 +114,20 @@ def save_credentials():
         session["api_hash"] = api_hash
         session["phone"] = phone
 
-        def _run():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        async def _send():
             from pyrogram import Client
+            # Purana client hata kar naya banate hain
             client = Client(f"session_{phone.replace('+', '')}", api_id=api_id, api_hash=api_hash, in_memory=True)
-            
-            async def _send():
-                await client.connect()
-                sent_code = await client.send_code(phone)
-                return client, sent_code
+            await client.connect()
+            sent_code = await client.send_code(phone)
+            # Session string ya client ko export/store karne ke liye save karte hain
+            temp_storage["phone"] = phone
+            temp_storage["api_id"] = api_id
+            temp_storage["api_hash"] = api_hash
+            return sent_code
 
-            return loop.run_until_complete(_send())
-
-        client, sent_code = _run()
+        sent_code = loop.run_until_complete(_send())
         session["phone_code_hash"] = sent_code.phone_code_hash
-        temp_storage["client"] = client
         session["waiting_for_otp"] = True
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="credentials", error=str(e))
@@ -136,27 +138,29 @@ def verify_otp():
     otp = request.form.get("otp").strip().replace(" ", "")
     phone = session.get("phone")
     phone_code_hash = session.get("phone_code_hash")
-    client = temp_storage.get("client")
+    api_id = session.get("api_id")
+    api_hash = session.get("api_hash")
     
-    def _run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def _verify():
-            from pyrogram.errors import SessionPasswordNeeded
-            try:
-                await client.sign_in(phone, phone_code_hash, otp)
-                session["logged_in"] = True
-                session.pop("waiting_for_otp", None)
-                await client.disconnect()
-            except SessionPasswordNeeded:
-                session.pop("waiting_for_otp", None)
-                session["waiting_for_password"] = True
-
-        loop.run_until_complete(_verify())
+    async def _verify():
+        from pyrogram import Client
+        from pyrogram.errors import SessionPasswordNeeded
+        client = Client(f"session_{phone.replace('+', '')}", api_id=api_id, api_hash=api_hash, in_memory=True)
+        await client.connect()
+        try:
+            await client.sign_in(phone, phone_code_hash, otp)
+            session["logged_in"] = True
+            session.pop("waiting_for_otp", None)
+            await client.disconnect()
+            return "success"
+        except SessionPasswordNeeded:
+            session.pop("waiting_for_otp", None)
+            session["waiting_for_password"] = True
+            # Client ko password step ke liye save rakhte hain
+            temp_storage["client"] = client
+            return "password_needed"
 
     try:
-        _run()
+        res = loop.run_until_complete(_verify())
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="otp", error=str(e))
     return redirect(url_for("index"))
@@ -166,20 +170,14 @@ def verify_password():
     password = request.form.get("password")
     client = temp_storage.get("client")
     
-    def _run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def _password():
-            await client.check_password(password)
-            session["logged_in"] = True
-            session.pop("waiting_for_password", None)
-            await client.disconnect()
-
-        loop.run_until_complete(_password())
+    async def _password():
+        await client.check_password(password)
+        session["logged_in"] = True
+        session.pop("waiting_for_password", None)
+        await client.disconnect()
 
     try:
-        _run()
+        loop.run_until_complete(_password())
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="password", error=str(e))
     return redirect(url_for("index"))
