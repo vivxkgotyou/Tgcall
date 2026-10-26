@@ -1,8 +1,6 @@
 import os
 import asyncio
 from flask import Flask, render_template_string, request, redirect, url_for, session
-from pyrogram import Client
-from pyrogram.errors import SessionPasswordNeeded
 
 app = Flask(__name__)
 app.secret_key = "vivek_panel_secret_key"
@@ -109,6 +107,7 @@ def index():
 @app.route("/save-credentials", methods=["POST"])
 def save_credentials():
     try:
+        from pyrogram import Client
         api_id = int(request.form.get("api_id").strip())
         api_hash = request.form.get("api_hash").strip()
         phone = request.form.get("phone").strip()
@@ -139,16 +138,18 @@ def verify_otp():
     client = temp_storage.get("client")
     
     async def _verify():
-        await client.sign_in(phone, phone_code_hash, otp)
-        await client.disconnect()
+        from pyrogram.errors import SessionPasswordNeeded
+        try:
+            await client.sign_in(phone, phone_code_hash, otp)
+            session["logged_in"] = True
+            session.pop("waiting_for_otp", None)
+            await client.disconnect()
+        except SessionPasswordNeeded:
+            session.pop("waiting_for_otp", None)
+            session["waiting_for_password"] = True
 
     try:
         run_async(_verify())
-        session["logged_in"] = True
-        session.pop("waiting_for_otp", None)
-    except SessionPasswordNeeded:
-        session.pop("waiting_for_otp", None)
-        session["waiting_for_password"] = True
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="otp", error=str(e))
     return redirect(url_for("index"))
@@ -160,12 +161,12 @@ def verify_password():
     
     async def _password():
         await client.check_password(password)
+        session["logged_in"] = True
+        session.pop("waiting_for_password", None)
         await client.disconnect()
 
     try:
         run_async(_password())
-        session["logged_in"] = True
-        session.pop("waiting_for_password", None)
     except Exception as e:
         return render_template_string(HTML_TEMPLATE, step="password", error=str(e))
     return redirect(url_for("index"))
