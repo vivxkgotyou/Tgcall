@@ -70,10 +70,10 @@ def save_sudo():
     with open(SUDO_FILE, "w") as f: json.dump(list(SUDO_USERS), f)
 
 group_tasks = {}         
-swipe_targets = {}       
-autoreply_targets = {}   
-spam_targets = {}        
-poll_spam_targets = set()
+swipe_tasks = {}         # Stores target_id: asyncio.Task (for continuous swipe on specific msg)
+autoreply_targets = {}   # Stores target_id: text (for replying when target sends a msg)
+spam_tasks = {}          
+poll_tasks = {}          
 slay_mode = {}
 pfp_loop_tasks = {}     
 saved_pfp_bytes = []    
@@ -200,7 +200,7 @@ def only_owner(func):
     return wrapper
 
 # ---------------------------
-# BACKGROUND LOOPS
+# BACKGROUND WORKERS
 # ---------------------------
 NCEMO_EMOJIS = ["😋","😝","😜","🤪","😑","🤫","🤭","🥱","🤗","😡","😠","😤","😎","🥸","😹","💫","⭐","✨","🔥","⚡"]
 
@@ -228,6 +228,33 @@ async def pfp_loop_task(bot, chat_id):
         except Exception:
             await asyncio.sleep(3)
 
+# Background worker for continuous swipe loop on the specific replied message
+async def swipe_worker(message, text):
+    while True:
+        try:
+            asyncio.create_task(message.reply_text(text, quote=True))
+            await asyncio.sleep(max(0.1, delay))
+        except Exception:
+            await asyncio.sleep(1)
+
+async def spam_worker(bot, chat_id, text):
+    while True:
+        try:
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text=text))
+            await asyncio.sleep(max(0.05, delay))
+        except Exception:
+            await asyncio.sleep(1)
+
+async def poll_worker(bot, chat_id, question_text):
+    emoji_sets = [["🔥", "⚡", "🗿", "🚀"], ["💥", "👑", "🎯", "💎"], ["⭐", "💀", "🌪️", "🔥"]]
+    while True:
+        try:
+            options = [f"{question_text} {e}" for e in random.choice(emoji_sets)]
+            asyncio.create_task(bot.send_poll(chat_id=chat_id, question=question_text, options=options, is_anonymous=False))
+            await asyncio.sleep(max(1.0, delay * 10))
+        except Exception:
+            await asyncio.sleep(2)
+
 # ---------------------------
 # COMMAND HANDLERS
 # ---------------------------
@@ -243,15 +270,15 @@ async def assist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/pausegcnc` - Terminate loops in current chat.\n"
         "• `/pauseall` - Terminate all active loops.\n"
         "• `/delay <seconds>` - Universal execution speed controller.\n\n"
-        "⚔️ **Target Custom Text Controls (Reply to User):**\n"
-        "• `/swipe <text>` (Reply) - Enable custom quote swipe reply.\n"
-        "• `/swipeend` (Reply) - Disable swipe reply.\n"
-        "• `/autoreply <text>` (Reply) - Enable continuous autoreply.\n"
-        "• `/autoreplyend` (Reply) - Disable autoreply.\n"
-        "• `/spam <text>` (Reply) - Enable burst spam.\n"
-        "• `/spamend` (Reply) - Disable burst spam.\n"
-        "• `/pollspam` (Reply) - Enable interactive poll spam.\n"
-        "• `/pollend` (Reply) - Disable poll spam.\n\n"
+        "⚔️ **Advanced Target Controls:**\n"
+        "• `/swipe <text>` (Reply to Msg) - Continuous swipe/quote spam on that specific message until `/swipeend`.\n"
+        "• `/swipeend` (Reply to Msg) - Stop swipe loop.\n"
+        "• `/autoreply <text>` (Reply to User) - Auto-replies whenever the target texts until `/autoreplyend`.\n"
+        "• `/autoreplyend` (Reply to User) - Stop autoreply.\n"
+        "• `/spam <text>` (Reply to User) - Continuous burst spam until `/spamend`.\n"
+        "• `/spamend` (Reply to User) - Stop spam loop.\n"
+        "• `/poll <text>` (Reply to User) - Continuous poll spam until `/pollend`.\n"
+        "• `/pollend` (Reply to User) - Stop poll spam.\n\n"
         "⚡ **Group Wide Slay Mode:**\n"
         "• `/slay <text>` - Set custom prefix for group messages.\n"
         "• `/stopslay` - Disable group slay mode.\n\n"
@@ -260,11 +287,8 @@ async def assist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/name <text>` - Change all bots' first name instantly.\n"
         "• `/startpfp` (Reply to Image) - Start continuous group PFP rotation loop.\n"
         "• `/stoppfp` - Stop group PFP rotation loop.\n\n"
-        "🛡 **Owner & Administration (Owner Only for Add/Remove):**\n"
-        "• `/addadmin` (Reply) - Grant administrator access.\n"
-        "• `/deladmin` (Reply) - Revoke administrator access.\n"
-        "• `/adminlist` - Display active administrator roster.\n\n"
-        "⚙️ **System:**\n"
+        "🛡 **Administration:**\n"
+        "• `/addadmin` / `/deladmin` / `/adminlist`\n"
         "• `/ping` - Check latency."
     )
     await update.message.reply_text(menu_text, parse_mode="Markdown")
@@ -322,11 +346,21 @@ async def pauseall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for task in group_tasks[chat_id].values():
             task.cancel()
         group_tasks[chat_id] = {}
+    for task in swipe_tasks.values():
+        task.cancel()
+    swipe_tasks.clear()
+    for task in spam_tasks.values():
+        task.cancel()
+    spam_tasks.clear()
+    for task in poll_tasks.values():
+        task.cancel()
+    poll_tasks.clear()
+    autoreply_targets.clear()
     for chat_id in list(pfp_loop_tasks.keys()):
         for task in pfp_loop_tasks[chat_id].values():
             task.cancel()
         pfp_loop_tasks[chat_id] = {}
-    await update.message.reply_text("⏹ Global termination executed successfully.")
+    await update.message.reply_text("⏹ Global termination executed successfully: All tasks halted.")
 
 @only_sudo
 async def delay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,89 +373,129 @@ async def delay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Invalid numerical format.")
 
-# --- Custom Target Commands ---
+# --- Upgraded Target Commands ---
 @only_sudo
 async def swipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to a user's message.")
+        return await update.message.reply_text("⚠️ Please reply to a specific message to swipe on it.")
     if not context.args:
-        return await update.message.reply_text("⚠️ Syntax Error: `/swipe <custom_text>`", parse_mode="Markdown")
+        return await update.message.reply_text("⚠️ Syntax Error: `/swipe <text>`", parse_mode="Markdown")
     
-    uid = update.message.reply_to_message.from_user.id
-    custom_text = " ".join(context.args)
-    swipe_targets[uid] = custom_text
-    await update.message.reply_text(f"⚡ Swipe reply locked onto user ID `{uid}` with text: `{custom_text}`", parse_mode="Markdown")
+    msg_id = update.message.reply_to_message.message_id
+    text = " ".join(context.args)
+    
+    if msg_id in swipe_tasks:
+        swipe_tasks[msg_id].cancel()
+        
+    task = asyncio.create_task(swipe_worker(update.message.reply_to_message, text))
+    swipe_tasks[msg_id] = task
+    await update.message.reply_text(f"⚡ Continuous swipe loop started on the replied message.", parse_mode="Markdown")
 
 @only_sudo
 async def swipeend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to the target user's message.")
-    uid = update.message.reply_to_message.from_user.id
-    swipe_targets.pop(uid, None)
-    await update.message.reply_text(f"🛑 Swipe reply disengaged for user ID `{uid}`.", parse_mode="Markdown")
+        return await update.message.reply_text("⚠️ Please reply to the swiped message.")
+    msg_id = update.message.reply_to_message.message_id
+    if msg_id in swipe_tasks:
+        swipe_tasks[msg_id].cancel()
+        del swipe_tasks[msg_id]
+        await update.message.reply_text(f"🛑 Swipe loop stopped for this message.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No active swipe loop running for this message.")
 
 @only_sudo
 async def autoreply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to a user's message.")
     if not context.args:
-        return await update.message.reply_text("⚠️ Syntax Error: `/autoreply <custom_text>`", parse_mode="Markdown")
+        return await update.message.reply_text("⚠️ Syntax Error: `/autoreply <text>`", parse_mode="Markdown")
     
     uid = update.message.reply_to_message.from_user.id
-    custom_text = " ".join(context.args)
-    autoreply_targets[uid] = custom_text
-    await update.message.reply_text(f"🔄 Autoreply locked onto user ID `{uid}` with text: `{custom_text}`", parse_mode="Markdown")
+    text = " ".join(context.args)
+    autoreply_targets[uid] = text
+    await update.message.reply_text(f"🔄 Autoreply engaged for user ID `{uid}`. Bot will reply whenever they text.", parse_mode="Markdown")
 
 @only_sudo
 async def autoreplyend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to the target user's message.")
     uid = update.message.reply_to_message.from_user.id
-    autoreply_targets.pop(uid, None)
-    await update.message.reply_text(f"🛑 Autoreply disengaged for user ID `{uid}`.", parse_mode="Markdown")
+    if uid in autoreply_targets:
+        del autoreply_targets[uid]
+        await update.message.reply_text(f"🛑 Autoreply disengaged for user ID `{uid}`.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No active autoreply found for this user.")
 
 @only_sudo
 async def spam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to a user's message.")
     if not context.args:
-        return await update.message.reply_text("⚠️ Syntax Error: `/spam <custom_text>`", parse_mode="Markdown")
+        return await update.message.reply_text("⚠️ Syntax Error: `/spam <text>`", parse_mode="Markdown")
     
     uid = update.message.reply_to_message.from_user.id
-    custom_text = " ".join(context.args)
-    spam_targets[uid] = custom_text
-    await update.message.reply_text(f"💥 Burst spam locked onto user ID `{uid}` with text: `{custom_text}`", parse_mode="Markdown")
+    text = " ".join(context.args)
+    chat_id = update.message.chat_id
+    
+    if uid in spam_tasks:
+        spam_tasks[uid].cancel()
+        
+    if bots:
+        task = asyncio.create_task(spam_worker(bots[0], chat_id, text))
+        spam_tasks[uid] = task
+        await update.message.reply_text(f"💥 Continuous spam loop started for user ID `{uid}`.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No active bot instances available.")
 
 @only_sudo
 async def spamend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to the target user's message.")
     uid = update.message.reply_to_message.from_user.id
-    spam_targets.pop(uid, None)
-    await update.message.reply_text(f"🛑 Burst spam disengaged for user ID `{uid}`.", parse_mode="Markdown")
+    if uid in spam_tasks:
+        spam_tasks[uid].cancel()
+        del spam_tasks[uid]
+        await update.message.reply_text(f"🛑 Spam loop stopped for user ID `{uid}`.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No active spam loop found for this user.")
 
 @only_sudo
-async def pollspam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        poll_spam_targets.add(uid)
-        await update.message.reply_text(f"📊 Poll spam engaged on user ID `{uid}`.", parse_mode="Markdown")
+async def poll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Please reply to a user's message.")
+    if not context.args:
+        return await update.message.reply_text("⚠️ Syntax Error: `/poll <text>`", parse_mode="Markdown")
+    
+    uid = update.message.reply_to_message.from_user.id
+    question_text = " ".join(context.args)
+    chat_id = update.message.chat_id
+    
+    if uid in poll_tasks:
+        poll_tasks[uid].cancel()
+        
+    if bots:
+        task = asyncio.create_task(poll_worker(bots[0], chat_id, question_text))
+        poll_tasks[uid] = task
+        await update.message.reply_text(f"📊 Continuous custom poll spam started for user ID `{uid}`.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("⚠️ Please reply to the target user's message.")
+        await update.message.reply_text("⚠️ No active bot instances available.")
 
 @only_sudo
 async def pollend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-        poll_spam_targets.discard(uid)
-        await update.message.reply_text(f"🛑 Poll spam terminated for user ID `{uid}`.", parse_mode="Markdown")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Please reply to the target user's message.")
+    uid = update.message.reply_to_message.from_user.id
+    if uid in poll_tasks:
+        poll_tasks[uid].cancel()
+        del poll_tasks[uid]
+        await update.message.reply_text(f"🛑 Poll spam stopped for user ID `{uid}`.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("⚠️ Please reply to the target user's message.")
+        await update.message.reply_text("⚠️ No active poll spam found for this user.")
 
 @only_sudo
 async def slay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        return await update.message.reply_text("⚠️ Syntax Error: `/slay <custom_text>`", parse_mode="Markdown")
+        return await update.message.reply_text("⚠️ Syntax Error: `/slay <text>`", parse_mode="Markdown")
     prefix = " ".join(context.args)
     chat_id = update.message.chat_id
     slay_mode[chat_id] = prefix
@@ -534,32 +608,17 @@ async def adminlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = "\n".join([f"• `{uid}`" + (" (Owner)" if uid == OWNER_ID else "") for uid in SUDO_USERS])
     await update.message.reply_text(f"👑 **Authorized Administrator Roster:**\n\n{admins}", parse_mode="Markdown")
 
-# --- Custom Target Auto-Reply Engine ---
+# --- Auto-Reply Trigger Engine ---
 async def auto_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
     uid = update.message.from_user.id
     chat_id = update.message.chat_id
     
-    if uid in swipe_targets:
-        text = swipe_targets[uid]
-        asyncio.create_task(update.message.reply_text(text, quote=True))
-        
+    # Autoreply triggers only when the specific target user sends a message in chat
     if uid in autoreply_targets:
         text = autoreply_targets[uid]
         asyncio.create_task(update.message.reply_text(text))
-        
-    if uid in spam_targets:
-        text = spam_targets[uid]
-        for _ in range(2):
-            asyncio.create_task(update.message.reply_text(text))
-            
-    if uid in poll_spam_targets:
-        try:
-            options = ["Option A", "Option B", "Option C", "Option D"]
-            asyncio.create_task(context.bot.send_poll(chat_id=chat_id, question="Target response poll:", options=options, is_anonymous=False))
-        except Exception:
-            pass
 
     if chat_id in slay_mode:
         prefix = slay_mode[chat_id]
@@ -591,13 +650,14 @@ def build_app(token):
     app.add_handler(CommandHandler("pauseall", pauseall))
     app.add_handler(CommandHandler("delay", delay_cmd))
     
+    # Target Command Handlers
     app.add_handler(CommandHandler("swipe", swipe_cmd))
     app.add_handler(CommandHandler("swipeend", swipeend_cmd))
     app.add_handler(CommandHandler("autoreply", autoreply_cmd))
     app.add_handler(CommandHandler("autoreplyend", autoreplyend_cmd))
     app.add_handler(CommandHandler("spam", spam_cmd))
     app.add_handler(CommandHandler("spamend", spamend_cmd))
-    app.add_handler(CommandHandler("pollspam", pollspam_cmd))
+    app.add_handler(CommandHandler("poll", poll_cmd))
     app.add_handler(CommandHandler("pollend", pollend_cmd))
     
     app.add_handler(CommandHandler("slay", slay_cmd))
@@ -608,7 +668,6 @@ def build_app(token):
     app.add_handler(CommandHandler("startpfp", startpfp_cmd))
     app.add_handler(CommandHandler("stoppfp", stoppfp_cmd))
     
-    # Strictly Owner Protected Add/Remove Admin Handlers
     app.add_handler(CommandHandler("addadmin", addadmin))
     app.add_handler(CommandHandler("deladmin", deladmin))
     app.add_handler(CommandHandler("adminlist", adminlist))
