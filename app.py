@@ -214,7 +214,7 @@ def only_owner(func):
     return wrapper
 
 # ---------------------------
-# FIXED BACKGROUND WORKERS
+# HIGH-SPEED BACKGROUND WORKERS
 # ---------------------------
 NCEMO_EMOJIS = ["😋","😝","😜","🤪","😑","🤫","🤭","🥱","🤗","😡","😠","😤","😎","🥸","😹","💫","⭐","✨","🔥","⚡"]
 
@@ -227,7 +227,7 @@ async def bot_loop(bot, chat_id, base, mode):
             i += 1
             await asyncio.sleep(delay)
         except Exception:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
 async def pfp_loop_task(bot, chat_id):
     while True:
@@ -237,15 +237,20 @@ async def pfp_loop_task(bot, chat_id):
                 await bot.set_chat_photo(chat_id=chat_id, photo=bytes(photo_bytes))
             await asyncio.sleep(max(5.0, delay * 20))
         except Exception:
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
 
-async def swipe_worker(message, text):
+# FIXED SWIPE WORKER (Uses chat_id and message_id directly for non-stop looping)
+async def swipe_worker(bot, chat_id, message_id, text):
     while True:
         try:
-            await message.reply_text(text, quote=True)
-            await asyncio.sleep(max(0.1, delay))
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=message_id
+            )
+            await asyncio.sleep(max(0.05, delay))
         except Exception:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
 async def spam_worker(bot, chat_id, text):
     while True:
@@ -253,7 +258,7 @@ async def spam_worker(bot, chat_id, text):
             await bot.send_message(chat_id=chat_id, text=text)
             await asyncio.sleep(max(0.05, delay))
         except Exception:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
 async def poll_worker(bot, chat_id, question_text):
     emoji_sets = [["🔥", "⚡", "🗿", "🚀"], ["💥", "👑", "🎯", "💎"], ["⭐", "💀", "🌪️", "🔥"]]
@@ -285,10 +290,10 @@ async def assist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/swipeend` (Reply to Msg) - Stop swipe loop.\n"
         "• `/autoreply <text>` (Reply to User) - Auto-replies whenever the target texts until `/autoreplyend`.\n"
         "• `/autoreplyend` (Reply to User) - Stop autoreply.\n"
-        "• `/spam <text>` (Reply to User) - Continuous burst spam until `/spamend`.\n"
-        "• `/spamend` (Reply to User) - Stop spam loop.\n"
-        "• `/poll <text>` (Reply to User) - Continuous poll spam until `/pollend`.\n"
-        "• `/pollend` (Reply to User) - Stop poll spam.\n\n"
+        "• `/spam <text>` - Continuous chat spam until `/spamend`.\n"
+        "• `/spamend` - Stop spam loop.\n"
+        "• `/poll <text>` - Continuous poll spam until `/pollend`.\n"
+        "• `/pollend` - Stop poll spam.\n\n"
         "⚡ **Group Wide Slay Mode:**\n"
         "• `/slay <text>` - Set custom prefix for group messages.\n"
         "• `/stopslay` - Disable group slay mode.\n\n"
@@ -383,7 +388,7 @@ async def delay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Invalid numerical format.")
 
-# --- Fixed Target Commands ---
+# --- Fixed Swipe Command ---
 @only_sudo
 async def swipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
@@ -392,14 +397,18 @@ async def swipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⚠️ Syntax Error: `/swipe <text>`", parse_mode="Markdown")
     
     msg_id = update.message.reply_to_message.message_id
+    chat_id = update.message.chat_id
     text = " ".join(context.args)
     
     if msg_id in swipe_tasks:
         swipe_tasks[msg_id].cancel()
         
-    task = asyncio.create_task(swipe_worker(update.message.reply_to_message, text))
-    swipe_tasks[msg_id] = task
-    await update.message.reply_text(f"⚡ Continuous swipe loop started on the replied message.", parse_mode="Markdown")
+    if bots:
+        task = asyncio.create_task(swipe_worker(bots[0], chat_id, msg_id, text))
+        swipe_tasks[msg_id] = task
+        await update.message.reply_text(f"⚡ Continuous high-speed swipe loop started on the replied message.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No active bot instances available.")
 
 @only_sudo
 async def swipeend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
