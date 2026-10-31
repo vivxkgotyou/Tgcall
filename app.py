@@ -8,7 +8,8 @@ import sys
 def install_requirements():
     required_packages = {
         "flask": "flask",
-        "telegram": "python-telegram-bot"
+        "telegram": "python-telegram-bot",
+        "requests": "requests"
     }
     for module_name, package_name in required_packages.items():
         try:
@@ -24,6 +25,7 @@ import json
 import random
 import time
 import threading
+import requests
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -70,10 +72,10 @@ def save_sudo():
     with open(SUDO_FILE, "w") as f: json.dump(list(SUDO_USERS), f)
 
 group_tasks = {}         
-swipe_tasks = {}         # Stores target_id: asyncio.Task (for continuous swipe on specific msg)
-autoreply_targets = {}   # Stores target_id: text (for replying when target sends a msg)
-spam_tasks = {}          
-poll_tasks = {}          
+swipe_tasks = {}         # Stores message_id: asyncio.Task
+autoreply_targets = {}   # Stores user_id: text
+spam_tasks = {}          # Stores chat_id: asyncio.Task
+poll_tasks = {}          # Stores chat_id: asyncio.Task
 slay_mode = {}
 pfp_loop_tasks = {}     
 saved_pfp_bytes = []    
@@ -177,6 +179,18 @@ def run_flask():
     app_flask.run(host="0.0.0.0", port=port)
 
 # ---------------------------
+# SELF-PING MECHANISM
+# ---------------------------
+def self_ping():
+    app_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
+    while True:
+        try:
+            time.sleep(300)
+            requests.get(app_url)
+        except Exception:
+            pass
+
+# ---------------------------
 # DECORATORS
 # ---------------------------
 def only_sudo(func):
@@ -200,7 +214,7 @@ def only_owner(func):
     return wrapper
 
 # ---------------------------
-# BACKGROUND WORKERS
+# FIXED BACKGROUND WORKERS
 # ---------------------------
 NCEMO_EMOJIS = ["😋","😝","😜","🤪","😑","🤫","🤭","🥱","🤗","😡","😠","😤","😎","🥸","😹","💫","⭐","✨","🔥","⚡"]
 
@@ -208,11 +222,8 @@ async def bot_loop(bot, chat_id, base, mode):
     i = 0
     while True:
         try:
-            if mode == "raid":
-                text = f"{base} {NCEMO_EMOJIS[i % len(NCEMO_EMOJIS)]}"
-            else:
-                text = f"{base} {NCEMO_EMOJIS[i % len(NCEMO_EMOJIS)]}"
-            asyncio.create_task(bot.set_chat_title(chat_id, text))
+            text = f"{base} {NCEMO_EMOJIS[i % len(NCEMO_EMOJIS)]}"
+            await bot.set_chat_title(chat_id, text)
             i += 1
             await asyncio.sleep(delay)
         except Exception:
@@ -228,32 +239,31 @@ async def pfp_loop_task(bot, chat_id):
         except Exception:
             await asyncio.sleep(3)
 
-# Background worker for continuous swipe loop on the specific replied message
 async def swipe_worker(message, text):
     while True:
         try:
-            asyncio.create_task(message.reply_text(text, quote=True))
+            await message.reply_text(text, quote=True)
             await asyncio.sleep(max(0.1, delay))
         except Exception:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
 async def spam_worker(bot, chat_id, text):
     while True:
         try:
-            asyncio.create_task(bot.send_message(chat_id=chat_id, text=text))
+            await bot.send_message(chat_id=chat_id, text=text)
             await asyncio.sleep(max(0.05, delay))
         except Exception:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
 async def poll_worker(bot, chat_id, question_text):
     emoji_sets = [["🔥", "⚡", "🗿", "🚀"], ["💥", "👑", "🎯", "💎"], ["⭐", "💀", "🌪️", "🔥"]]
     while True:
         try:
             options = [f"{question_text} {e}" for e in random.choice(emoji_sets)]
-            asyncio.create_task(bot.send_poll(chat_id=chat_id, question=question_text, options=options, is_anonymous=False))
-            await asyncio.sleep(max(1.0, delay * 10))
+            await bot.send_poll(chat_id=chat_id, question=question_text, options=options, is_anonymous=False)
+            await asyncio.sleep(max(0.5, delay * 5))
         except Exception:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
 # ---------------------------
 # COMMAND HANDLERS
@@ -373,7 +383,7 @@ async def delay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Invalid numerical format.")
 
-# --- Upgraded Target Commands ---
+# --- Fixed Target Commands ---
 @only_sudo
 async def swipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
@@ -428,69 +438,59 @@ async def autoreplyend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @only_sudo
 async def spam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to a user's message.")
     if not context.args:
         return await update.message.reply_text("⚠️ Syntax Error: `/spam <text>`", parse_mode="Markdown")
     
-    uid = update.message.reply_to_message.from_user.id
     text = " ".join(context.args)
     chat_id = update.message.chat_id
     
-    if uid in spam_tasks:
-        spam_tasks[uid].cancel()
+    if chat_id in spam_tasks:
+        spam_tasks[chat_id].cancel()
         
     if bots:
         task = asyncio.create_task(spam_worker(bots[0], chat_id, text))
-        spam_tasks[uid] = task
-        await update.message.reply_text(f"💥 Continuous spam loop started for user ID `{uid}`.", parse_mode="Markdown")
+        spam_tasks[chat_id] = task
+        await update.message.reply_text(f"💥 Continuous chat spam started.", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ No active bot instances available.")
 
 @only_sudo
 async def spamend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to the target user's message.")
-    uid = update.message.reply_to_message.from_user.id
-    if uid in spam_tasks:
-        spam_tasks[uid].cancel()
-        del spam_tasks[uid]
-        await update.message.reply_text(f"🛑 Spam loop stopped for user ID `{uid}`.", parse_mode="Markdown")
+    chat_id = update.message.chat_id
+    if chat_id in spam_tasks:
+        spam_tasks[chat_id].cancel()
+        del spam_tasks[chat_id]
+        await update.message.reply_text(f"🛑 Chat spam loop stopped.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("⚠️ No active spam loop found for this user.")
+        await update.message.reply_text("⚠️ No active spam loop found in this chat.")
 
 @only_sudo
 async def poll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to a user's message.")
     if not context.args:
         return await update.message.reply_text("⚠️ Syntax Error: `/poll <text>`", parse_mode="Markdown")
     
-    uid = update.message.reply_to_message.from_user.id
     question_text = " ".join(context.args)
     chat_id = update.message.chat_id
     
-    if uid in poll_tasks:
-        poll_tasks[uid].cancel()
+    if chat_id in poll_tasks:
+        poll_tasks[chat_id].cancel()
         
     if bots:
         task = asyncio.create_task(poll_worker(bots[0], chat_id, question_text))
-        poll_tasks[uid] = task
-        await update.message.reply_text(f"📊 Continuous custom poll spam started for user ID `{uid}`.", parse_mode="Markdown")
+        poll_tasks[chat_id] = task
+        await update.message.reply_text(f"📊 Continuous custom poll spam started.", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ No active bot instances available.")
 
 @only_sudo
 async def pollend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to the target user's message.")
-    uid = update.message.reply_to_message.from_user.id
-    if uid in poll_tasks:
-        poll_tasks[uid].cancel()
-        del poll_tasks[uid]
-        await update.message.reply_text(f"🛑 Poll spam stopped for user ID `{uid}`.", parse_mode="Markdown")
+    chat_id = update.message.chat_id
+    if chat_id in poll_tasks:
+        poll_tasks[chat_id].cancel()
+        del poll_tasks[chat_id]
+        await update.message.reply_text(f"🛑 Poll spam stopped in this chat.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("⚠️ No active poll spam found for this user.")
+        await update.message.reply_text("⚠️ No active poll spam found in this chat.")
 
 @only_sudo
 async def slay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,7 +615,6 @@ async def auto_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     chat_id = update.message.chat_id
     
-    # Autoreply triggers only when the specific target user sends a message in chat
     if uid in autoreply_targets:
         text = autoreply_targets[uid]
         asyncio.create_task(update.message.reply_text(text))
@@ -650,7 +649,6 @@ def build_app(token):
     app.add_handler(CommandHandler("pauseall", pauseall))
     app.add_handler(CommandHandler("delay", delay_cmd))
     
-    # Target Command Handlers
     app.add_handler(CommandHandler("swipe", swipe_cmd))
     app.add_handler(CommandHandler("swipeend", swipeend_cmd))
     app.add_handler(CommandHandler("autoreply", autoreply_cmd))
@@ -698,6 +696,10 @@ async def run_all_bots():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    ping_thread = threading.Thread(target=self_ping)
+    ping_thread.daemon = True
+    ping_thread.start()
+
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
