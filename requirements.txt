@@ -1,4 +1,0 @@
-flask
-pyrogram
-tgcrypto
-gunicorn
