@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: vivek-panel
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 1 app:app
-    plan: free
